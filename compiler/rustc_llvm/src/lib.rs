@@ -192,6 +192,13 @@ pub fn initialize_available_targets() {
         LLVMInitializeRISCVAsmParser
     );
     init_target!(
+        llvm_component = "rux16",
+        LLVMInitializeRux16TargetInfo,
+        LLVMInitializeRux16Target,
+        LLVMInitializeRux16TargetMC,
+        LLVMInitializeRux16AsmPrinter
+    );
+    init_target!(
         llvm_component = "sparc",
         LLVMInitializeSparcTargetInfo,
         LLVMInitializeSparcTarget,
