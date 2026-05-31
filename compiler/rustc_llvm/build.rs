@@ -26,7 +26,7 @@ const OPTIONAL_COMPONENTS: &[&str] = &[
     "nvptx",
     "hexagon",
     "riscv",
-    "rux16",
+    "k16",
     "xtensa",
     "bpf",
 ];
