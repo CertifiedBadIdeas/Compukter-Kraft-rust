@@ -109,6 +109,6 @@ cfg_select! {
         mod zkvm;
     }
     target_os = "kraftos" => {
-        mod unsupported;
+        mod kraftos;
     }
 }

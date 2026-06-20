@@ -1,5 +1,11 @@
 use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut};
 
+unsafe extern "C" {
+    fn __k16_write_syscall(fd: u32, ptr: *const u8, len: u32) -> u32;
+}
+
+const FD_STDOUT: u32 = 1;
+
 pub struct Stdin;
 pub struct Stdout;
 pub type Stderr = Stdout;
@@ -28,8 +34,6 @@ impl io::Read for Stdin {
 
     #[inline]
     fn is_read_vectored(&self) -> bool {
-        // Do not force `Chain<Empty, T>` or `Chain<T, Empty>` to use vectored
-        // reads, unless the other reader is vectored.
         false
     }
 
@@ -63,13 +67,16 @@ impl Stdout {
 impl io::Write for Stdout {
     #[inline]
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        Ok(buf.len())
+        write_fd(FD_STDOUT, buf)
     }
 
     #[inline]
     fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
-        let total_len = bufs.iter().map(|b| b.len()).sum();
-        Ok(total_len)
+        let mut written = 0;
+        for buf in bufs {
+            written += write_fd(FD_STDOUT, buf)?;
+        }
+        Ok(written)
     }
 
     #[inline]
@@ -78,16 +85,18 @@ impl io::Write for Stdout {
     }
 
     #[inline]
-    fn write_all(&mut self, _buf: &[u8]) -> io::Result<()> {
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        write_fd(FD_STDOUT, buf)?;
         Ok(())
     }
 
     #[inline]
-    fn write_all_vectored(&mut self, _bufs: &mut [IoSlice<'_>]) -> io::Result<()> {
+    fn write_all_vectored(&mut self, bufs: &mut [IoSlice<'_>]) -> io::Result<()> {
+        for buf in bufs {
+            write_fd(FD_STDOUT, buf)?;
+        }
         Ok(())
     }
-
-    // Keep the default write_fmt so the `fmt::Arguments` are still evaluated.
 
     #[inline]
     fn flush(&mut self) -> io::Result<()> {
@@ -95,10 +104,25 @@ impl io::Write for Stdout {
     }
 }
 
+fn write_fd(fd: u32, buf: &[u8]) -> io::Result<usize> {
+    if buf.is_empty() {
+        return Ok(0);
+    }
+    let len = u32::try_from(buf.len()).map_err(|_| io::Error::UNSUPPORTED_PLATFORM)?;
+    let written = unsafe { __k16_write_syscall(fd, buf.as_ptr(), len) };
+    if written & 0x8000_0000 != 0 {
+        return Err(io::Error::UNSUPPORTED_PLATFORM);
+    }
+    if written != len {
+        return Err(io::Error::WRITE_ALL_EOF);
+    }
+    Ok(buf.len())
+}
+
 pub const STDIN_BUF_SIZE: usize = 0;
 
 pub fn is_ebadf(_err: &io::Error) -> bool {
-    true
+    false
 }
 
 pub fn panic_output() -> Option<Vec<u8>> {

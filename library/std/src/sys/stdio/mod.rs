@@ -45,6 +45,10 @@ cfg_select! {
         mod zkvm;
         pub use zkvm::*;
     }
+    target_os = "kraftos" => {
+        mod kraftos;
+        pub use kraftos::*;
+    }
     _ => {
         mod unsupported;
         pub use unsupported::*;
