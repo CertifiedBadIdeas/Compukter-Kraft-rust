@@ -250,6 +250,14 @@ impl fmt::Debug for BytesOrWide {
 impl Backtrace {
     /// Returns whether backtrace captures are enabled through environment
     /// variables.
+    #[cfg(target_os = "kraftos")]
+    fn enabled() -> bool {
+        false
+    }
+
+    /// Returns whether backtrace captures are enabled through environment
+    /// variables.
+    #[cfg(not(target_os = "kraftos"))]
     fn enabled() -> bool {
         // Cache the result of reading the environment variables to make
         // backtrace captures speedy, because otherwise reading environment
@@ -290,10 +298,18 @@ impl Backtrace {
     #[stable(feature = "backtrace", since = "1.65.0")]
     #[inline(never)] // want to make sure there's a frame here to remove
     pub fn capture() -> Backtrace {
+        #[cfg(target_os = "kraftos")]
+        {
+            return Backtrace { inner: Inner::Disabled };
+        }
+
+        #[cfg(not(target_os = "kraftos"))]
+        {
         if !Backtrace::enabled() {
             return Backtrace { inner: Inner::Disabled };
         }
         Backtrace::create(Backtrace::capture as fn() -> Backtrace as usize)
+        }
     }
 
     /// Forcibly captures a full backtrace, regardless of environment variable
@@ -309,6 +325,12 @@ impl Backtrace {
     #[stable(feature = "backtrace", since = "1.65.0")]
     #[inline(never)] // want to make sure there's a frame here to remove
     pub fn force_capture() -> Backtrace {
+        #[cfg(target_os = "kraftos")]
+        {
+            return Backtrace { inner: Inner::Unsupported };
+        }
+
+        #[cfg(not(target_os = "kraftos"))]
         Backtrace::create(Backtrace::force_capture as fn() -> Backtrace as usize)
     }
 
@@ -322,6 +344,7 @@ impl Backtrace {
 
     // Capture a backtrace which start just before the function addressed by
     // `ip`
+    #[cfg(not(target_os = "kraftos"))]
     fn create(ip: usize) -> Backtrace {
         let _lock = lock();
         let mut frames = Vec::new();

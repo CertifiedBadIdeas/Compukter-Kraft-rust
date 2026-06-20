@@ -1,5 +1,15 @@
 use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut};
 
+#[cfg(target_os = "kraftos")]
+unsafe extern "C" {
+    fn __k16_write_syscall(fd: u32, ptr: *const u8, len: u32) -> u32;
+}
+
+#[cfg(target_os = "kraftos")]
+const FD_STDOUT: u32 = 1;
+#[cfg(target_os = "kraftos")]
+const FD_STDERR: u32 = 2;
+
 pub struct Stdin;
 pub struct Stdout;
 pub type Stderr = Stdout;
@@ -62,12 +72,28 @@ impl Stdout {
 
 impl io::Write for Stdout {
     #[inline]
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+    fn write(&mut self, #[cfg_attr(not(target_os = "kraftos"), allow(unused_variables))] buf: &[u8]) -> io::Result<usize> {
+        #[cfg(target_os = "kraftos")]
+        {
+            return write_fd(FD_STDOUT, buf);
+        }
         Ok(buf.len())
     }
 
     #[inline]
-    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+    fn write_vectored(
+        &mut self,
+        #[cfg_attr(not(target_os = "kraftos"), allow(unused_variables))] bufs: &[IoSlice<'_>],
+    ) -> io::Result<usize> {
+        #[cfg(target_os = "kraftos")]
+        {
+            let mut written = 0;
+            for buf in bufs {
+                written += write_fd(FD_STDOUT, buf)?;
+            }
+            return Ok(written);
+        }
+
         let total_len = bufs.iter().map(|b| b.len()).sum();
         Ok(total_len)
     }
@@ -78,12 +104,28 @@ impl io::Write for Stdout {
     }
 
     #[inline]
-    fn write_all(&mut self, _buf: &[u8]) -> io::Result<()> {
+    fn write_all(&mut self, #[cfg_attr(not(target_os = "kraftos"), allow(unused_variables))] buf: &[u8]) -> io::Result<()> {
+        #[cfg(target_os = "kraftos")]
+        {
+            write_fd(FD_STDOUT, buf)?;
+            return Ok(());
+        }
         Ok(())
     }
 
     #[inline]
-    fn write_all_vectored(&mut self, _bufs: &mut [IoSlice<'_>]) -> io::Result<()> {
+    fn write_all_vectored(
+        &mut self,
+        #[cfg_attr(not(target_os = "kraftos"), allow(unused_variables))] bufs: &mut [IoSlice<'_>],
+    ) -> io::Result<()> {
+        #[cfg(target_os = "kraftos")]
+        {
+            for buf in bufs {
+                write_fd(FD_STDOUT, buf)?;
+            }
+            return Ok(());
+        }
+
         Ok(())
     }
 
@@ -95,9 +137,30 @@ impl io::Write for Stdout {
     }
 }
 
+#[cfg(target_os = "kraftos")]
+fn write_fd(fd: u32, buf: &[u8]) -> io::Result<usize> {
+    if buf.is_empty() {
+        return Ok(0);
+    }
+    let len = u32::try_from(buf.len()).map_err(|_| io::Error::UNSUPPORTED_PLATFORM)?;
+    let written = unsafe { __k16_write_syscall(fd, buf.as_ptr(), len) };
+    if written & 0x8000_0000 != 0 {
+        return Err(io::Error::UNSUPPORTED_PLATFORM);
+    }
+    if written != len {
+        return Err(io::Error::WRITE_ALL_EOF);
+    }
+    Ok(buf.len())
+}
+
 pub const STDIN_BUF_SIZE: usize = 0;
 
-pub fn is_ebadf(_err: &io::Error) -> bool {
+pub fn is_ebadf(#[cfg_attr(target_os = "kraftos", allow(unused_variables))] _err: &io::Error) -> bool {
+    #[cfg(target_os = "kraftos")]
+    {
+        return false;
+    }
+
     true
 }
 

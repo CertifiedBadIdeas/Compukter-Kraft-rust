@@ -25,6 +25,7 @@ const MIN_ALIGN: usize = if cfg!(any(
     target_arch = "sparc",
     target_arch = "wasm32",
     target_arch = "hexagon",
+    target_arch = "k16",
     target_arch = "riscv32",
     target_arch = "xtensa",
 )) {
@@ -106,5 +107,8 @@ cfg_select! {
     }
     target_os = "zkvm" => {
         mod zkvm;
+    }
+    target_os = "kraftos" => {
+        mod unsupported;
     }
 }

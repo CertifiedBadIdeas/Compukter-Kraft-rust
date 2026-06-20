@@ -57,6 +57,7 @@ fn main() {
         || target_os == "nuttx"
         || target_os == "cygwin"
         || target_os == "vexos"
+        || target_os == "kraftos"
 
         // See src/bootstrap/src/core/build_steps/synthetic_targets.rs
         || env::var("RUSTC_BOOTSTRAP_SYNTHETIC_TARGET").is_ok()
@@ -76,7 +77,9 @@ fn main() {
     }
 
     println!("cargo:rustc-check-cfg=cfg(backtrace_in_libstd)");
-    println!("cargo:rustc-cfg=backtrace_in_libstd");
+    if target_os != "kraftos" {
+        println!("cargo:rustc-cfg=backtrace_in_libstd");
+    }
 
     println!("cargo:rustc-env=STD_ENV_ARCH={}", env::var("CARGO_CFG_TARGET_ARCH").unwrap());
 
