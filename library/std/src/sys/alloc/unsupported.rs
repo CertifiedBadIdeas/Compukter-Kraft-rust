@@ -1,43 +1,28 @@
 use crate::alloc::{GlobalAlloc, Layout, System};
-use crate::cell::UnsafeCell;
 use crate::ptr;
-use crate::sync::atomic::{AtomicUsize, Ordering};
 
-const HEAP_SIZE: usize = 256 * 1024;
-
-struct BumpHeap(UnsafeCell<[u8; HEAP_SIZE]>);
-
-unsafe impl Sync for BumpHeap {}
-
-static HEAP: BumpHeap = BumpHeap(UnsafeCell::new([0; HEAP_SIZE]));
-static NEXT: AtomicUsize = AtomicUsize::new(0);
+unsafe extern "C" {
+    fn __k16_sbrk_syscall(delta: u32) -> u32;
+}
 
 #[stable(feature = "alloc_system_type", since = "1.28.0")]
 unsafe impl GlobalAlloc for System {
     #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let size = layout.size();
-        if size == 0 {
+        if layout.size() == 0 {
             return layout.align() as *mut u8;
         }
-        let align_mask = layout.align() - 1;
-        let mut current = NEXT.load(Ordering::Relaxed);
-        loop {
-            let aligned = (current + align_mask) & !align_mask;
-            let Some(next) = aligned.checked_add(size) else {
-                return ptr::null_mut();
-            };
-            if next > HEAP_SIZE {
-                return ptr::null_mut();
-            }
-            match NEXT.compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed) {
-                Ok(_) => {
-                    let base = HEAP.0.get().cast::<u8>();
-                    return unsafe { base.add(aligned) };
-                }
-                Err(updated) => current = updated,
-            }
+        let Some(delta) = allocation_delta(layout) else {
+            return ptr::null_mut();
+        };
+        let old_break = unsafe { __k16_sbrk_syscall(delta) };
+        if is_error_status(old_break) {
+            return ptr::null_mut();
         }
+        let Some(aligned) = align_up(old_break, layout.align() as u32) else {
+            return ptr::null_mut();
+        };
+        aligned as usize as *mut u8
     }
 
     #[inline]
@@ -47,4 +32,20 @@ unsafe impl GlobalAlloc for System {
     unsafe fn realloc(&self, ptr: *mut u8, old_layout: Layout, new_size: usize) -> *mut u8 {
         unsafe { super::realloc_fallback(self, ptr, old_layout, new_size) }
     }
+}
+
+fn allocation_delta(layout: Layout) -> Option<u32> {
+    let size = u32::try_from(layout.size()).ok()?;
+    let align = u32::try_from(layout.align()).ok()?;
+    size.checked_add(align.checked_sub(1)?)
+}
+
+fn align_up(value: u32, alignment: u32) -> Option<u32> {
+    let mask = alignment.checked_sub(1)?;
+    value.checked_add(mask).map(|value| value & !mask)
+}
+
+#[inline(always)]
+fn is_error_status(status: u32) -> bool {
+    status & 0x8000_0000 != 0
 }
