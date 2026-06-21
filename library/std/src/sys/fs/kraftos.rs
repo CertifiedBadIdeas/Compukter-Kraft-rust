@@ -7,36 +7,59 @@ use crate::path::{Path, PathBuf};
 pub use crate::sys::fs::common::Dir;
 use crate::sys::time::SystemTime;
 use crate::sys::unsupported;
+use crate::vec::Vec;
 use core::cell::Cell;
 
 unsafe extern "C" {
     fn __k16_open_syscall(ptr: *const u8, len: u32, flags: u32) -> u32;
     fn __k16_read_syscall(fd: u32, ptr: *mut u8, len: u32) -> u32;
     fn __k16_write_syscall(fd: u32, ptr: *const u8, len: u32) -> u32;
+    fn __k16_read_dir_syscall(ptr: *const u8, len: u32) -> u32;
+    fn __k16_stat_syscall(ptr: *const u8, len: u32, out: *mut u8) -> u32;
     fn __k16_close_syscall(fd: u32) -> u32;
 }
 
+const READ_DIR_REQUEST_MAGIC: u32 = 0x5249_4452;
+const MAX_READ_DIR_PATH_BYTES: usize = 228;
+const MAX_READ_DIR_REQUEST_BYTES: usize = 16 + MAX_READ_DIR_PATH_BYTES;
+const STAT_METADATA_BYTES: usize = 16;
+const FILE_TYPE_REGULAR: u32 = 1;
+const FILE_TYPE_DIRECTORY: u32 = 2;
+const FILE_ATTR_DIRECTORY_BIT: u32 = 0x0100_0000;
 const OPEN_READ_ONLY: u32 = 0;
 const OPEN_WRITE_ONLY: u32 = 1;
 const OPEN_CREATE: u32 = 1 << 1;
 const OPEN_TRUNCATE: u32 = 1 << 2;
 const OPEN_APPEND: u32 = 1 << 3;
 const READ_BOUNCE_SIZE: usize = 512;
+const READ_DIR_BOUNCE_SIZE: usize = 4096;
 
 // KraftOS userland is currently single-threaded. Keep kernel writes away from
 // caller stack probes until the K16 backend's cross-ABI stack writes are solid.
 static mut READ_BOUNCE: [u8; READ_BOUNCE_SIZE] = [0; READ_BOUNCE_SIZE];
+static mut READ_DIR_BOUNCE: [u8; READ_DIR_BOUNCE_SIZE] = [0; READ_DIR_BOUNCE_SIZE];
+static mut STAT_BOUNCE: [u8; STAT_METADATA_BYTES] = [0; STAT_METADATA_BYTES];
 
 pub struct File {
     fd: u32,
     eof: Cell<bool>,
 }
 
-pub struct FileAttr(!);
+pub struct FileAttr {
+    packed: u32,
+}
 
-pub struct ReadDir(!);
+pub struct ReadDir {
+    entries: Vec<DirEntry>,
+    index: usize,
+}
 
-pub struct DirEntry(!);
+#[derive(Clone)]
+pub struct DirEntry {
+    path: PathBuf,
+    name: OsString,
+    file_type: FileType,
+}
 
 #[derive(Clone, Debug)]
 pub struct OpenOptions {
@@ -51,72 +74,86 @@ pub struct OpenOptions {
 #[derive(Copy, Clone, Debug, Default)]
 pub struct FileTimes {}
 
-pub struct FilePermissions(!);
+pub struct FilePermissions {
+    readonly: bool,
+}
 
-pub struct FileType(!);
+pub struct FileType {
+    kind: u32,
+}
 
 #[derive(Debug)]
 pub struct DirBuilder {}
 
 impl FileAttr {
     pub fn size(&self) -> u64 {
-        self.0
+        let size = if self.packed >= FILE_ATTR_DIRECTORY_BIT {
+            self.packed - FILE_ATTR_DIRECTORY_BIT
+        } else {
+            self.packed
+        };
+        u64::from(size)
     }
 
     pub fn perm(&self) -> FilePermissions {
-        self.0
+        FilePermissions { readonly: false }
     }
 
     pub fn file_type(&self) -> FileType {
-        self.0
+        let kind = if self.packed >= FILE_ATTR_DIRECTORY_BIT {
+            FILE_TYPE_DIRECTORY
+        } else {
+            FILE_TYPE_REGULAR
+        };
+        FileType { kind }
     }
 
     pub fn modified(&self) -> io::Result<SystemTime> {
-        self.0
+        unsupported()
     }
 
     pub fn accessed(&self) -> io::Result<SystemTime> {
-        self.0
+        unsupported()
     }
 
     pub fn created(&self) -> io::Result<SystemTime> {
-        self.0
+        unsupported()
     }
 }
 
 impl Clone for FileAttr {
     fn clone(&self) -> FileAttr {
-        self.0
+        FileAttr { packed: self.packed }
     }
 }
 
 impl FilePermissions {
     pub fn readonly(&self) -> bool {
-        self.0
+        self.readonly
     }
 
-    pub fn set_readonly(&mut self, _readonly: bool) {
-        self.0
+    pub fn set_readonly(&mut self, readonly: bool) {
+        self.readonly = readonly;
     }
 }
 
 impl Clone for FilePermissions {
     fn clone(&self) -> FilePermissions {
-        self.0
+        FilePermissions { readonly: self.readonly }
     }
 }
 
 impl PartialEq for FilePermissions {
-    fn eq(&self, _other: &FilePermissions) -> bool {
-        self.0
+    fn eq(&self, other: &FilePermissions) -> bool {
+        self.readonly == other.readonly
     }
 }
 
 impl Eq for FilePermissions {}
 
 impl fmt::Debug for FilePermissions {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FilePermissions").field("readonly", &self.readonly).finish()
     }
 }
 
@@ -127,49 +164,52 @@ impl FileTimes {
 
 impl FileType {
     pub fn is_dir(&self) -> bool {
-        self.0
+        self.kind == FILE_TYPE_DIRECTORY
     }
 
     pub fn is_file(&self) -> bool {
-        self.0
+        self.kind == FILE_TYPE_REGULAR
     }
 
     pub fn is_symlink(&self) -> bool {
-        self.0
+        false
     }
 }
 
 impl Clone for FileType {
     fn clone(&self) -> FileType {
-        self.0
+        *self
     }
 }
 
 impl Copy for FileType {}
 
 impl PartialEq for FileType {
-    fn eq(&self, _other: &FileType) -> bool {
-        self.0
+    fn eq(&self, other: &FileType) -> bool {
+        self.kind == other.kind
     }
 }
 
 impl Eq for FileType {}
 
 impl Hash for FileType {
-    fn hash<H: Hasher>(&self, _h: &mut H) {
-        self.0
+    fn hash<H: Hasher>(&self, h: &mut H) {
+        self.kind.hash(h);
     }
 }
 
 impl fmt::Debug for FileType {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FileType").field("kind", &self.kind).finish()
     }
 }
 
 impl fmt::Debug for ReadDir {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReadDir")
+            .field("len", &self.entries.len())
+            .field("index", &self.index)
+            .finish()
     }
 }
 
@@ -177,25 +217,27 @@ impl Iterator for ReadDir {
     type Item = io::Result<DirEntry>;
 
     fn next(&mut self) -> Option<io::Result<DirEntry>> {
-        self.0
+        let entry = self.entries.get(self.index)?.clone();
+        self.index += 1;
+        Some(Ok(entry))
     }
 }
 
 impl DirEntry {
     pub fn path(&self) -> PathBuf {
-        self.0
+        self.path.clone()
     }
 
     pub fn file_name(&self) -> OsString {
-        self.0
+        self.name.clone()
     }
 
     pub fn metadata(&self) -> io::Result<FileAttr> {
-        self.0
+        stat(&self.path)
     }
 
     pub fn file_type(&self) -> io::Result<FileType> {
-        self.0
+        Ok(self.file_type)
     }
 }
 
@@ -415,8 +457,53 @@ impl fmt::Debug for File {
     }
 }
 
-pub fn readdir(_p: &Path) -> io::Result<ReadDir> {
-    unsupported()
+pub fn readdir(p: &Path) -> io::Result<ReadDir> {
+    let path = p.as_os_str().as_encoded_bytes();
+    if path.is_empty() || path.len() > MAX_READ_DIR_PATH_BYTES {
+        return Err(io::Error::UNSUPPORTED_PLATFORM);
+    }
+
+    let mut request = [0u8; MAX_READ_DIR_REQUEST_BYTES];
+    write_u32_le(&mut request, 0, READ_DIR_REQUEST_MAGIC);
+    write_u32_le(&mut request, 4, path.len() as u32);
+    let out = core::ptr::addr_of_mut!(READ_DIR_BOUNCE).cast::<u8>();
+    write_u32_le(&mut request, 8, out as usize as u32);
+    write_u32_le(&mut request, 12, READ_DIR_BOUNCE_SIZE as u32);
+    request[16..16 + path.len()].copy_from_slice(path);
+
+    let request_len =
+        u32::try_from(16 + path.len()).map_err(|_| io::Error::UNSUPPORTED_PLATFORM)?;
+    let read = unsafe { __k16_read_dir_syscall(request.as_ptr(), request_len) };
+    if syscall_failed(read) {
+        return Err(io::Error::UNSUPPORTED_PLATFORM);
+    }
+    let read = usize::try_from(read).map_err(|_| io::Error::UNSUPPORTED_PLATFORM)?;
+    if read > READ_DIR_BOUNCE_SIZE {
+        return Err(io::Error::UNSUPPORTED_PLATFORM);
+    }
+
+    let listing = unsafe { core::slice::from_raw_parts(out.cast_const(), read) };
+    let mut entries = Vec::new();
+    let mut cursor = 0;
+    while cursor < listing.len() {
+        let start = cursor;
+        while cursor < listing.len() && listing[cursor] != b'\n' {
+            cursor += 1;
+        }
+        let name_bytes = &listing[start..cursor];
+        if name_bytes.is_empty() {
+            return Err(io::Error::UNSUPPORTED_PLATFORM);
+        }
+        let name = unsafe { OsString::from_encoded_bytes_unchecked(name_bytes.to_vec()) };
+        let path = child_path(p, &name)?;
+        let file_type = stat(&path)?.file_type();
+        entries.push(DirEntry { path, name, file_type });
+        if cursor < listing.len() {
+            cursor += 1;
+        }
+    }
+
+    Ok(ReadDir { entries, index: 0 })
 }
 
 pub fn unlink(_p: &Path) -> io::Result<()> {
@@ -427,8 +514,8 @@ pub fn rename(_old: &Path, _new: &Path) -> io::Result<()> {
     unsupported()
 }
 
-pub fn set_perm(_p: &Path, perm: FilePermissions) -> io::Result<()> {
-    match perm.0 {}
+pub fn set_perm(_p: &Path, _perm: FilePermissions) -> io::Result<()> {
+    unsupported()
 }
 
 pub fn set_times(_p: &Path, _times: FileTimes) -> io::Result<()> {
@@ -463,12 +550,32 @@ pub fn link(_src: &Path, _dst: &Path) -> io::Result<()> {
     unsupported()
 }
 
-pub fn stat(_p: &Path) -> io::Result<FileAttr> {
-    unsupported()
+pub fn stat(p: &Path) -> io::Result<FileAttr> {
+    let path = p.as_os_str().as_encoded_bytes();
+    if path.is_empty() || path.len() > MAX_READ_DIR_PATH_BYTES {
+        return Err(io::Error::UNSUPPORTED_PLATFORM);
+    }
+    let len = u32::try_from(path.len()).map_err(|_| io::Error::UNSUPPORTED_PLATFORM)?;
+    let out = core::ptr::addr_of_mut!(STAT_BOUNCE).cast::<u8>();
+    let status = unsafe { __k16_stat_syscall(path.as_ptr(), len, out) };
+    if syscall_failed(status) {
+        return Err(io::Error::UNSUPPORTED_PLATFORM);
+    }
+    let metadata = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(STAT_BOUNCE)) };
+    let kind = read_u32_le(&metadata, 0);
+    if kind != FILE_TYPE_REGULAR && kind != FILE_TYPE_DIRECTORY {
+        return Err(io::Error::UNSUPPORTED_PLATFORM);
+    }
+    let size = read_u32_le(&metadata, 4);
+    if size >= FILE_ATTR_DIRECTORY_BIT {
+        return Err(io::Error::UNSUPPORTED_PLATFORM);
+    }
+    let packed = if kind == FILE_TYPE_DIRECTORY { size + FILE_ATTR_DIRECTORY_BIT } else { size };
+    Ok(FileAttr { packed })
 }
 
-pub fn lstat(_p: &Path) -> io::Result<FileAttr> {
-    unsupported()
+pub fn lstat(p: &Path) -> io::Result<FileAttr> {
+    stat(p)
 }
 
 pub fn canonicalize(_p: &Path) -> io::Result<PathBuf> {
@@ -481,4 +588,18 @@ pub fn copy(_from: &Path, _to: &Path) -> io::Result<u64> {
 
 fn syscall_failed(status: u32) -> bool {
     status & 0x8000_0000 != 0
+}
+
+fn child_path(parent: &Path, name: &OsString) -> io::Result<PathBuf> {
+    let mut path = parent.to_path_buf();
+    path.push(Path::new(name));
+    Ok(path)
+}
+
+fn write_u32_le(bytes: &mut [u8], offset: usize, value: u32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn read_u32_le(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]])
 }
