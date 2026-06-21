@@ -12,10 +12,15 @@ use core::cell::Cell;
 unsafe extern "C" {
     fn __k16_open_syscall(ptr: *const u8, len: u32, flags: u32) -> u32;
     fn __k16_read_syscall(fd: u32, ptr: *mut u8, len: u32) -> u32;
+    fn __k16_write_syscall(fd: u32, ptr: *const u8, len: u32) -> u32;
     fn __k16_close_syscall(fd: u32) -> u32;
 }
 
 const OPEN_READ_ONLY: u32 = 0;
+const OPEN_WRITE_ONLY: u32 = 1;
+const OPEN_CREATE: u32 = 1 << 1;
+const OPEN_TRUNCATE: u32 = 1 << 2;
+const OPEN_APPEND: u32 = 1 << 3;
 const READ_BOUNCE_SIZE: usize = 512;
 
 // KraftOS userland is currently single-threaded. Keep kernel writes away from
@@ -233,19 +238,31 @@ impl OpenOptions {
 
 impl File {
     pub fn open(path: &Path, opts: &OpenOptions) -> io::Result<File> {
-        if !opts.read
-            || opts.write
-            || opts.append
-            || opts.truncate
-            || opts.create
-            || opts.create_new
-        {
+        if opts.create_new || opts.read == opts.write && !opts.append {
             return unsupported();
         }
+        let flags = if opts.read {
+            if opts.append || opts.truncate || opts.create {
+                return unsupported();
+            }
+            OPEN_READ_ONLY
+        } else {
+            let mut flags = OPEN_WRITE_ONLY;
+            if opts.create {
+                flags |= OPEN_CREATE;
+            }
+            if opts.truncate {
+                flags |= OPEN_TRUNCATE;
+            }
+            if opts.append {
+                flags |= OPEN_APPEND;
+            }
+            flags
+        };
 
         let path = path.as_os_str().as_encoded_bytes();
         let len = u32::try_from(path.len()).map_err(|_| io::Error::UNSUPPORTED_PLATFORM)?;
-        let fd = unsafe { __k16_open_syscall(path.as_ptr(), len, OPEN_READ_ONLY) };
+        let fd = unsafe { __k16_open_syscall(path.as_ptr(), len, flags) };
         if syscall_failed(fd) {
             return Err(io::Error::UNSUPPORTED_PLATFORM);
         }
@@ -327,12 +344,20 @@ impl File {
         crate::io::default_read_buf(|buf| self.read(buf), cursor)
     }
 
-    pub fn write(&self, _buf: &[u8]) -> io::Result<usize> {
-        unsupported()
+    pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
+        let len = u32::try_from(buf.len()).map_err(|_| io::Error::UNSUPPORTED_PLATFORM)?;
+        let written = unsafe { __k16_write_syscall(self.fd, buf.as_ptr(), len) };
+        if syscall_failed(written) {
+            return Err(io::Error::UNSUPPORTED_PLATFORM);
+        }
+        if written > len {
+            return Err(io::Error::UNSUPPORTED_PLATFORM);
+        }
+        usize::try_from(written).map_err(|_| io::Error::UNSUPPORTED_PLATFORM)
     }
 
-    pub fn write_vectored(&self, _bufs: &[IoSlice<'_>]) -> io::Result<usize> {
-        unsupported()
+    pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        crate::io::default_write_vectored(|buf| self.write(buf), bufs)
     }
 
     pub fn is_write_vectored(&self) -> bool {
