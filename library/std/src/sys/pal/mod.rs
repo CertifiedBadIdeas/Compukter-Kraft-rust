@@ -24,6 +24,10 @@ cfg_select! {
         mod motor;
         pub use self::motor::*;
     }
+    target_os = "kraftos" => {
+        mod kraftos;
+        pub use self::kraftos::*;
+    }
     target_os = "trusty" => {
         mod trusty;
         pub use self::trusty::*;
